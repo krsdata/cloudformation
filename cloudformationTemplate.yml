@@ -5,8 +5,8 @@
 # This defines the infrastructure used to create a Custom stack. Stack creation
 # itself is handled via a deployment tool, Moonshot.
 #
-# @see https://github.com/krsdata/cloudformation
-# @see https://github.com/krsdata/cloudformation/blob/master/finalTemplate.yml
+# @see https://github.com/krsdata
+# @see https://github.com/krsdata/cloudformation/tree/master/doc
 #
 Description: CloudFormation template for Custom EC2.
 
@@ -65,7 +65,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Parameters:
   ArtifactBucket:
     Type: String
-    Default: my-custom-bucket
+    Default: custom-bucket
     Description: The S3 bucket that contains the build artifacts that CodeDeploy will deploy.
   AvailabilityZone1:
     Type: AWS::EC2::AvailabilityZone::Name
@@ -77,6 +77,8 @@ Parameters:
     Type: Number
     Default: '1'
     Description: The desired number of EC2 instances used for the application.
+   
+
   Environment:
     Description: The short name of the environment associated with the stack. Deprecated.
     Type: String
@@ -137,9 +139,9 @@ Resources:
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
   #
-  SubnetProxyZoneA:
+  SubnetUptimeProxyZoneA:
     Type: AWS::EC2::Subnet
-    DependsOn: SecurityGroupEC2Proxy
+    DependsOn: SecurityGroupN3UptimeProxy
     Properties:
       CidrBlock: 10.176.10.0/26 
       AvailabilityZone:
@@ -159,20 +161,20 @@ Resources:
     Type: AWS::EC2::SubnetRouteTableAssociation
     DependsOn:
       - RouteTableProxy
-      - SubnetProxyZoneA
+      - SubnetUptimeProxyZoneA
     Properties:
       RouteTableId:
           Ref: RouteTableProxy
       SubnetId:
-        Ref: SubnetProxyZoneA
+        Ref: SubnetUptimeProxyZoneA
   #
   # Defines the subnet for Uptime to exist within the second AZ.
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
   # 
-  SubnetProxyZoneB:
+  SubnetUptimeProxyZoneB:
     Type: AWS::EC2::Subnet
-    DependsOn: SecurityGroupEC2Proxy
+    DependsOn: SecurityGroupN3UptimeProxy
     Properties:
       AvailabilityZone:
         Ref: AvailabilityZone2
@@ -193,12 +195,12 @@ Resources:
     Type: AWS::EC2::SubnetRouteTableAssociation
     DependsOn:
       - RouteTableProxy
-      - SubnetProxyZoneB
+      - SubnetUptimeProxyZoneB
     Properties:
       RouteTableId:
         Ref: RouteTableProxy
       SubnetId: 
-        Ref: SubnetProxyZoneB
+        Ref: SubnetUptimeProxyZoneB
   #
   # Defines the internet gateway for the Uptime VPC.
   #
@@ -281,7 +283,7 @@ Resources:
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl.html
   #
-  NetworkAclEC2Proxy:
+  NetworkAclN3UptimeProxy:
     Type: AWS::EC2::NetworkAcl
     Properties:
       VpcId: 
@@ -294,13 +296,13 @@ Resources:
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl-entry.html
   #
-  OutboundNetworkAclEC2Proxy:
+  OutboundNetworkAclN3UptimeProxy:
     Type: AWS::EC2::NetworkAclEntry
     Properties:
       CidrBlock: 0.0.0.0/0
       Egress: true
       NetworkAclId: 
-        Ref: NetworkAclEC2Proxy
+        Ref: NetworkAclN3UptimeProxy
       Protocol: '-1' # -1 = all protocols
       RuleAction: allow
       RuleNumber: 100 # arbitrary rule weight
@@ -313,12 +315,12 @@ Resources:
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl-entry.html
   #
-  InboundNetworkAclEC2Proxy:
+  InboundNetworkAclN3UptimeProxy:
     Type: AWS::EC2::NetworkAclEntry
     Properties:
       CidrBlock: 0.0.0.0/0
       NetworkAclId: 
-        Ref: NetworkAclEC2Proxy
+        Ref: NetworkAclN3UptimeProxy
       Protocol: '-1' # -1 = all protocols
       RuleAction: allow
       RuleNumber: 100 # arbitrary rule weight
@@ -327,31 +329,31 @@ Resources:
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-network-acl-assoc.html
   #
-  SubnetANetworkAclAssociationEC2Proxy:
+  SubnetANetworkAclAssociationN3UptimeProxy:
     Type: AWS::EC2::SubnetNetworkAclAssociation
     DependsOn:
-      - NetworkAclEC2Proxy
-      - SubnetProxyZoneA
+      - NetworkAclN3UptimeProxy
+      - SubnetUptimeProxyZoneA
     Properties:
       NetworkAclId: 
-        Ref: NetworkAclEC2Proxy
+        Ref: NetworkAclN3UptimeProxy
       SubnetId:
-        Ref: SubnetProxyZoneA
+        Ref: SubnetUptimeProxyZoneA
   #
   # Associates the network ACL defined above with the first AZ's subnet.
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-network-acl-assoc.html
   #
-  SubnetBNetworkAclAssociationEC2Proxy:
+  SubnetBNetworkAclAssociationN3UptimeProxy:
     Type: AWS::EC2::SubnetNetworkAclAssociation
     DependsOn:
-      - NetworkAclEC2Proxy
-      - SubnetProxyZoneB
+      - NetworkAclN3UptimeProxy
+      - SubnetUptimeProxyZoneB
     Properties:
       NetworkAclId:
-        Ref: NetworkAclEC2Proxy
+        Ref: NetworkAclN3UptimeProxy
       SubnetId: 
-        Ref: SubnetProxyZoneB
+        Ref: SubnetUptimeProxyZoneB
 
   RouteTable:
     Type: AWS::EC2::RouteTable
@@ -376,12 +378,12 @@ Resources:
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group.html
   #
-  SecurityGroupEC2ProxyELB:
+  SecurityGroupN3UptimeProxyELB:
     Type: AWS::EC2::SecurityGroup
     Properties:
       VpcId:
         Ref: VPC
-      GroupDescription: SecurityGroupEC2Elb
+      GroupDescription: SecurityGroupN3UptimeElb
       SecurityGroupIngress:
       - IpProtocol: tcp
         FromPort: 443
@@ -402,16 +404,16 @@ Resources:
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-elb.html
   #  
-  ELBEC2Proxy:
+  ELBN3UptimeProxy:
     Type: AWS::ElasticLoadBalancing::LoadBalancer
     DependsOn:
       - VPCGatewayAttachment
-      - SubnetProxyZoneA
-      - SubnetProxyZoneB
+      - SubnetUptimeProxyZoneA
+      - SubnetUptimeProxyZoneB
     Properties:
       Subnets:
-        - Ref: SubnetProxyZoneA
-        - Ref: SubnetProxyZoneB
+        - Ref: SubnetUptimeProxyZoneA
+        - Ref: SubnetUptimeProxyZoneB
       HealthCheck:
         # Instances are considered unhealthy if they don't respond on the Uptime
         # proxy port after 5 seconds more than 2 times in a row. The check is
@@ -429,7 +431,7 @@ Resources:
         IdleTimeout: 60
       CrossZone: true
       SecurityGroups:
-        - Ref: SecurityGroupEC2ProxyELB
+        - Ref: SecurityGroupN3UptimeProxyELB
       Listeners:
         - InstancePort: 80
           InstanceProtocol: HTTP
@@ -497,7 +499,7 @@ Resources:
   #
   # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group.html
   #
-  SecurityGroupEC2Proxy:
+  SecurityGroupN3UptimeProxy:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: 'Uptime proxy security group'
@@ -508,7 +510,7 @@ Resources:
           FromPort: 443
           ToPort: 443
           SourceSecurityGroupId:
-            Ref: SecurityGroupEC2ProxyELB
+            Ref: SecurityGroupN3UptimeProxyELB
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
@@ -539,6 +541,7 @@ Resources:
   LaunchConfiguration:
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties:
+      LaunchConfigurationName: CustomLaunchConfig
       AssociatePublicIpAddress: true
       ImageId:
         Fn::FindInMap:
@@ -549,19 +552,19 @@ Resources:
         Ref: InstanceProfile
       InstanceType: t2.micro
       SecurityGroups:
-      - Ref: SecurityGroupEC2Proxy
+      - Ref: SecurityGroupN3UptimeProxy
       BlockDeviceMappings:
         - DeviceName: '/dev/sda1'
           Ebs:
             VolumeSize: 20
-      KeyName: ec2KeyPair # enter ec2 key pairname
+      KeyName: ec2Keypair
       UserData:
         Fn::Base64:
           Fn::Join:
           - "\n"
           - - "#!/bin/bash -v"
             - sudo apt-get -y update
-            - sudo apt-get -y install curl git python-pip python-setuptools python zip apache2
+            - sudo apt-get -y install curl git python-pip python-setuptools python zip apache2 php
             - sudo service apache2 restart
   #     
   # Auto-scaling application resources
@@ -595,15 +598,15 @@ Resources:
       LaunchConfigurationName:
         Ref: LaunchConfiguration
       LoadBalancerNames:
-      - Ref: ELBEC2Proxy
+      - Ref: ELBN3UptimeProxy
       MaxSize: 5
       MinSize:
         Ref: DesiredCapacity
       TerminationPolicies:
       - OldestLaunchConfiguration
       VPCZoneIdentifier:
-      - Ref: SubnetProxyZoneA
-      - Ref: SubnetProxyZoneB
+      - Ref: SubnetUptimeProxyZoneA
+      - Ref: SubnetUptimeProxyZoneB
     UpdatePolicy:
       AutoScalingRollingUpdate:
         MaxBatchSize: '1'
