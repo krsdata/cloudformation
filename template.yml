@@ -1,0 +1,1119 @@
+---
+#
+# N3 Uptime CloudFormation template
+#
+# This defines the infrastructure used to create a N3 Uptime stack. Stack creation
+# itself is handled via a deployment tool, Moonshot.
+#
+# @see https://github.com/acquia/moonshot
+# @see https://github.com/acquia/n3-uptime/tree/master/doc
+#
+Description: CloudFormation template for N3 Uptime, the N3 notification system.
+
+#
+# AWSTemplateFormatVersion
+#
+# The version of the schema used for CloudFormation. This should virtually never
+# need to change.
+#
+AWSTemplateFormatVersion: '2010-09-09'
+
+#
+# Functions
+#
+# Template values can be dynamically calculated via the use of functions.
+#
+# @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/intrinsic-function-reference.html
+#
+# Common functions used in this template:
+#
+# - 'Fn::GetAtt': [ 'ResourceName', 'PropertyName' ]
+#   Similar to Ref, this replaces the current value with the value of a property
+#   either defined within the template or by Amazon itself.
+#
+# - 'Fn::FindInMap': [ 'MappingName', 'KeyName', 'PropertyName' ]
+#   Replaces the current value with the value found within a mapping, defined
+#   later within the mappings section. This allows dynamically changing the
+#   value based on the stack's environment, like which account or region it's
+#   launched in.
+#
+# - 'Fn::Sub': 'String'
+#    Replaces a tokenized string with a dynamically-generated value, similar to
+#    PHP's strtr(). Tokens are defined as ${ResourceName}, which works like Ref
+#    above, or ${ResourceName.PropertyName}, which works like Fn::GetAtt above.
+#
+# Note: the Ruby AWS SDK does not support short form functions correctly at this
+# time, causing Moonshot to generate incorrect changesets when used. Long form
+# functions must be used until this is fixed.
+#
+
+
+#
+# Parameters
+#
+# Parameters are a way to pass external values to the template.
+#
+# Using Moonshot, parameters are supplied via an answers file (an example can be
+# found in /moonshot/config/answers-example.yml) or interactively when creating
+# a stack.
+#
+# Moonshot will attempt to use existing values whenever possible. In practice,
+# this means you do not need to supply parameters via an answers file when
+# updating a stack unless you want to change the existing values.
+#
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+    Default: n3uptime-bucket
+    Description: The S3 bucket that contains the build artifacts that CodeDeploy will deploy.
+  AvailabilityZone1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1d
+  AvailabilityZone2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1b
+  DesiredCapacity:
+    Type: Number
+    Default: '2'
+    Description: The desired number of EC2 instances used for the application.
+  DBInstanceIdentifier1:
+    Type: String
+    Default: 'n3UptimeRdsAurora1'
+    Description: Rds Database Instance Identifier
+  DBInstanceIdentifier2:
+    Type: String
+    Default: 'n3UptimeRdsAurora2'
+    Description: Rds Database Instance Identifier
+  SqsNameIdentifier:
+    Type: String
+    Default: n3UptimeSqs.fifo
+    Description: Sqs name for n3uptime scanner
+  # Lambda function to add domain in sqs
+  LambdaFnToAddDomainInSqs:
+    Type: String
+    Default: addDomainToSqs
+    Description: N3 uptime lambda function to add domain to sqs queue in every 5 minutes
+  # Lambda function to pull sqs entry
+  LambdaFnToPullSqsEntries:
+    Type: String
+    Default: pullSqsEntries
+    Description: N3 uptime lambda function to pull sqs queue entry in every minutes
+ # Lambda function for scanner
+  N3UptimeLambdaFunctionForScanner:
+    Type: String
+    Default: n3uptimeScanner
+    Description: N3 uptime lambda function to scan the domain.
+  DataBaseName:
+    Type: String
+    Default: n3uptime
+    Description: N3 uptime aurora database name
+  DataBaseUser:
+    Type: String
+    Default: n3uptime
+    Description: N3 uptime aurora database username
+  DataBasePassword:
+    NoEcho: true
+    Type: String
+    Description: Passwords must be at least 8 characters long, contain upper and lower case characters, a number, and at least one special character.Printable ASCII character except "/", """, or "@"
+  SetDBBackUpPeriod:
+    Type: String
+    Default: '30'
+    Description: The number of days for which automatic backups are retained
+
+  # Domain name prefix
+  DomainNamePrefix:
+    Description: The domain name prefix that will be assigned to stack resources (e.g. https://uptime-DomainNamePrefix.n3.dev.cloudservices.acquia.io)
+    Type: String
+    Default: dev
+
+  DomainHostedZone:
+    Description: The FQDN that will be assigned to stack resources (e.g. https://uptime-dev.n3.DomainHostedZone)
+    Type: String
+    Default: dev.cloudservices.acquia.io
+    AllowedValues:
+      # Development value
+      - dev.cloudservices.acquia.io
+      # Production value
+      - cloudservices.acquia.io
+
+  Environment:
+    Description: The short name of the environment associated with the stack. Deprecated.
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - stg
+      - prod
+      - scrubbed
+
+  UptimeSslCertArn:
+    Description: The ARN of the SSL certificate to use with the Uptime proxy ELB.
+    Type: String
+    Default: arn:aws:acm:us-east-1:672327909798:certificate/892c0c83-1304-45ee-9f9e-cda1ddfa429c
+    AllowedValues:
+      # Development value
+      - arn:aws:acm:us-east-1:672327909798:certificate/892c0c83-1304-45ee-9f9e-cda1ddfa429c
+
+  RemoteAccessCidr:
+    Description: The IPv4 CIDR to allow remote SSH access to Uptime proxy instances.
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}(\/([0-9]|[1-2][0-9]|3[0-2]))?$'
+    ConstraintDescription: The value provided is not a valid IPv4 CIDR.
+#
+# Outputs
+#
+# Outputs are values that represent the results of the stack formation. They can
+# be used in other CloudFormation stacks or be purely informational.
+#
+# You can view the current output values for an existing stack using Moonshot:
+#
+#     $ bundle exec moonshot status --environment=$STACKNAME
+#
+Outputs:
+  UptimeURL:
+    Description: The URL of the N3 Uptime proxy load balancer.
+    Value:
+      'Fn::Sub': 'https://uptime-${DomainNamePrefix}.n3.${DomainHostedZone}'
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      AMI: ami-01be14bb799729fda
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.176.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:
+          Ref: AWS::StackName
+  #
+  # Defines the route table for the Uptime VPC.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route-table.html
+  # @see http://docs.aws.amazon.com/AmazonVPC/latest/UserGuide/VPC_Route_Tables.html
+  #
+  RouteTableProxy:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  #
+  # Defines the subnet for Uptime to exist within the first availability zone (AZ).
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+  #
+  SubnetUptimeProxyZoneA:
+    Type: AWS::EC2::Subnet
+    DependsOn: SecurityGroupN3UptimeProxy
+    Properties:
+      CidrBlock: 10.176.10.0/26
+      AvailabilityZone:
+        Ref: AvailabilityZone1
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+            Ref: AWS::StackName
+  #
+  # Associates the subnet for the first AZ defined above to the VPC and its route table.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+  #
+  SubnetRouteTableAssociationUptimeZoneA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - RouteTableProxy
+      - SubnetUptimeProxyZoneA
+    Properties:
+      RouteTableId:
+          Ref: RouteTableProxy
+      SubnetId:
+        Ref: SubnetUptimeProxyZoneA
+  #
+  # Defines the subnet for Uptime to exist within the second AZ.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+  #
+  SubnetUptimeProxyZoneB:
+    Type: AWS::EC2::Subnet
+    DependsOn: SecurityGroupN3UptimeProxy
+    Properties:
+      AvailabilityZone:
+        Ref: AvailabilityZone2
+      CidrBlock: 10.176.10.64/26
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+            Ref: AWS::StackName
+
+  #
+  # Associates the subnet for the second AZ defined above to the VPC and its route table.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+  #
+  SubnetRouteTableAssociationUptimeZoneB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - RouteTableProxy
+      - SubnetUptimeProxyZoneB
+    Properties:
+      RouteTableId:
+        Ref: RouteTableProxy
+      SubnetId:
+        Ref: SubnetUptimeProxyZoneB
+  #
+  # Defines the internet gateway for the Uptime VPC.
+  #
+  # Internet gateways allow resources within a VPC to talk to the external world.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-internet-gateway.html
+  #
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Ref: AWS::StackName
+
+  #
+  # Attaches the internet gateway defined above to the Uptime VPC.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc-gateway-attachment.html
+  #
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: InternetGateway
+      VpcId:
+        Ref: VPC
+  #
+  # Creates a route between the internet gateway and the VPC's route table.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route.html
+  #
+  route1:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId:
+        Ref: RouteTableProxy
+      GatewayId:
+          Ref: InternetGateway
+  #
+  # Defines the DHCP options for the Uptime VPC.
+  #
+  # DHCP dynamically allocates IP addresses to resources within the Uptime stack.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-dhcp-options.html
+  #
+  DHCPOptions:
+    Type: AWS::EC2::DHCPOptions
+    Properties:
+      DomainName: ec2.internal
+      DomainNameServers:
+        - AmazonProvidedDNS
+  #
+  # Associates the DHCP options defined above to the VPC.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc-dhcp-options-assoc.html
+  #
+  DHCPOptionsAssociationVPC:
+    Type: AWS::EC2::VPCDHCPOptionsAssociation
+    Properties:
+      VpcId:
+        Ref: VPC
+      DhcpOptionsId:
+        Ref: DHCPOptions
+  #
+  # Security and ACL resources
+  #
+  # These resources define the level of access the external world has to the
+  # resources and networks within the stack. For example, these resources define
+  # the ports and IP subnets resources within the stack will respond to.
+  #
+  # @see http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-network-security.html
+  # @see http://docs.aws.amazon.com/AmazonVPC/latest/UserGuide/VPC_ACLs.html
+  #
+
+  #
+  # Defines the access control list for the Uptime stack's network.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl.html
+  #
+  NetworkAclN3UptimeProxy:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId:
+        Ref: VPC
+
+  #
+  # Defines the outbound network ACL rules for the Uptime stack.
+  #
+  # Effectively, all outbound network traffic is allowed.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl-entry.html
+  #
+  OutboundNetworkAclN3UptimeProxy:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAclN3UptimeProxy
+      Protocol: '-1' # -1 = all protocols
+      RuleAction: allow
+      RuleNumber: 100 # arbitrary rule weight
+
+  #
+  # Defines the inbound network ACL rules for the Uptime stack.
+  #
+  # Effectively, all inbound network traffic is allowed. Access to specific
+  # resources is defined at the application level via security groups instead.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl-entry.html
+  #
+  InboundNetworkAclN3UptimeProxy:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId:
+        Ref: NetworkAclN3UptimeProxy
+      Protocol: '-1' # -1 = all protocols
+      RuleAction: allow
+      RuleNumber: 100 # arbitrary rule weight
+  #
+  # Associates the network ACL defined above with the first AZ's subnet.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-network-acl-assoc.html
+  #
+  SubnetANetworkAclAssociationN3UptimeProxy:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    DependsOn:
+      - NetworkAclN3UptimeProxy
+      - SubnetUptimeProxyZoneA
+    Properties:
+      NetworkAclId:
+        Ref: NetworkAclN3UptimeProxy
+      SubnetId:
+        Ref: SubnetUptimeProxyZoneA
+  #
+  # Associates the network ACL defined above with the first AZ's subnet.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-network-acl-assoc.html
+  #
+  SubnetBNetworkAclAssociationN3UptimeProxy:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    DependsOn:
+      - NetworkAclN3UptimeProxy
+      - SubnetUptimeProxyZoneB
+    Properties:
+      NetworkAclId:
+        Ref: NetworkAclN3UptimeProxy
+      SubnetId:
+        Ref: SubnetUptimeProxyZoneB
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+  #
+  # DNS resources
+  #
+  # These resources define DNS records for the Uptime stack using Route 53.
+  #
+  #
+  # Defines a zone for Uptime's domains.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-route53-hostedzone.html
+  # @deprecated We're not using this at all.
+  #
+  HostedZoneUptimeProxy:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: internal
+      VPCs:
+        - VPCId:
+            Ref: VPC
+          VPCRegion:
+            Ref: AWS::Region
+  #
+  # Defines the main DNS record set for the Uptime stack.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-route53-recordsetgroup.html
+  #
+  RecordSetGroupUptimeProxy:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName:
+        'Fn::Sub': '${DomainHostedZone}.'
+      RecordSets:
+        # Uptime proxy ELB
+        - Name:
+            'Fn::Sub': 'uptime-${DomainNamePrefix}.n3.${DomainHostedZone}.'
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              'Fn::GetAtt': [ ELBN3UptimeProxy, CanonicalHostedZoneNameID ]
+            DNSName:
+              'Fn::GetAtt': [ ELBN3UptimeProxy, CanonicalHostedZoneName ]
+
+  #
+  # Defines the access rules, at an application level, for the Uptime load balancer.
+  #
+  # Effectively allows all outbound traffic, but only allows inbound HTTPS
+  # traffic.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group.html
+  #
+  SecurityGroupN3UptimeProxyELB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Ref: VPC
+      GroupDescription: SecurityGroupN3UptimeElb
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1 # -1 = Access on all ports and protocols
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "RDS Subnet Group "
+      SubnetIds:
+      - Ref: SubnetUptimeProxyZoneA
+      - Ref: SubnetUptimeProxyZoneB
+
+  #
+  # Defines the load balancer (ELB) in front of the Uptime proxy EC2 instances.
+  #
+  # Typical of load balancers, most of the properties define the ELB's ability
+  # to monitor the EC2 instances it fronts.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-elb.html
+  #
+  ELBN3UptimeProxy:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    DependsOn:
+      - VPCGatewayAttachment
+      - SubnetUptimeProxyZoneA
+      - SubnetUptimeProxyZoneB
+    Properties:
+      Subnets:
+        - Ref: SubnetUptimeProxyZoneA
+        - Ref: SubnetUptimeProxyZoneB
+      HealthCheck:
+        # Instances are considered unhealthy if they don't respond on the Uptime
+        # proxy port after 5 seconds more than 2 times in a row. The check is
+        # done every 30 seconds. Unhealthy instances can become healthy again
+        # if they pass the check 10 times in a row.
+        HealthyThreshold: 10
+        Interval: 30
+        Target: 'HTTP:80/'
+        Timeout: 15
+        UnhealthyThreshold: 2
+      ConnectionDrainingPolicy:
+        Enabled: true
+        Timeout: 300
+      ConnectionSettings:
+        IdleTimeout: 60
+      CrossZone: true
+      SecurityGroups:
+        - Ref: SecurityGroupN3UptimeProxyELB
+      Listeners:
+        - InstancePort: 80
+          InstanceProtocol: HTTP
+          LoadBalancerPort: 80
+          Protocol: HTTP
+        - InstancePort: 80
+          InstanceProtocol: HTTP
+          LoadBalancerPort: 443
+          Protocol: HTTPS
+          SSLCertificateId:
+            Ref: UptimeSslCertArn
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ArtifactAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: ArtifactBucket
+                - "/*"
+
+      - PolicyName: 'AllowLambdaAccess'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: "Allow"
+            Resource:
+              Fn::Join:
+                - ''
+                - - 'arn:aws:logs:'
+                  - Ref: AWS::Region
+                  - ':'
+                  - Ref: AWS::AccountId
+                  - ':log-group:/aws/lambda/*'
+                  - Ref: LambdaFnToAddDomainInSqs
+                  - Ref: LambdaFnToPullSqsEntries
+                  - Ref: N3UptimeLambdaFunctionForScanner
+          - Action:
+              - ec2:DescribeNetworkInterfaces
+              - ec2:CreateNetworkInterface
+              - ec2:DeleteNetworkInterface
+            Effect: "Allow"
+            Resource: "*"
+
+      - PolicyName: ElbAutoDrainAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - elasticloadbalancing:Describe*
+            - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+            - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+            - autoscaling:Describe*
+            - autoscaling:EnterStandby
+            - autoscaling:ExitStandby
+            - autoscaling:UpdateAutoScalingGroup
+            Resource: "*"
+
+      - PolicyName: logs
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+      - PolicyName: sqs
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - sqs:*
+            Resource: "*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: Role
+
+  #
+  # Defines the access rules, at an application level, for the Uptime EC2 instances.
+  #
+  # Effectively allows all outbound traffic, but only allows inbound SSH
+  # traffic. The EC2 instances will receive inbound HTTP(S) traffic from the
+  # load balancer.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group.html
+  #
+  SecurityGroupN3UptimeProxy:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Uptime proxy security group'
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId:
+            Ref: SecurityGroupN3UptimeProxyELB
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Ref: RemoteAccessCidr
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Ref: RemoteAccessCidr
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: "-1"
+        ToPort: "-1"
+        CidrIp: 0.0.0.0/0
+
+  #
+  # Define the AWS::RDS::DBSubnetGroup type creates an RDS database subnet group.
+  # Subnet groups must contain at least two subnets in two different Availability Zones in the same region.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-rds-dbsubnet-group.html
+  #
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Dev DB subent groups
+      SubnetIds:
+        - Ref: SubnetUptimeProxyZoneA
+        - Ref: SubnetUptimeProxyZoneB
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - PROJECT_NAME-
+            - Ref: Environment
+            - "-db"
+  #
+  # Defines the resource creates a cluster, such as an Aurora for Amazon RDS (Amazon Aurora) DB cluster.
+  # Aurora is a fully managed, MySQL-compatible, relational database engine
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-rds-dbcluster.html
+  #
+
+  RDSCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DatabaseName:
+        Ref: DataBaseName
+      MasterUsername:
+        Ref: DataBaseUser
+      MasterUserPassword:
+        Ref: DataBasePassword
+      Engine: aurora
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+      DBClusterParameterGroupName:
+        Ref: RDSDBClusterParameterGroup
+      VpcSecurityGroupIds:
+      - Ref: N3UptimeDBSecurityGroup
+      BackupRetentionPeriod:
+        Ref: SetDBBackUpPeriod
+
+  N3UptimeDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Ref: VPC
+      GroupDescription: SecurityGroup for N3 Uptime Database
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '3306'
+        ToPort: '3306'
+        CidrIp: 10.176.0.0/16
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: "-1"
+        ToPort: "-1"
+        CidrIp: 0.0.0.0/0
+
+  RDSDBInstance1:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+      DBParameterGroupName:
+        Ref: RDSDBParameterGroup
+      Engine: aurora
+      DBClusterIdentifier:
+        Ref: RDSCluster
+      DBInstanceIdentifier:
+        Ref: DBInstanceIdentifier1
+      AvailabilityZone:
+        Fn::GetAtt:
+        - SubnetUptimeProxyZoneA
+        - AvailabilityZone
+      DBInstanceClass: db.t2.small
+
+  RDSDBInstance2:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+      DBParameterGroupName:
+        Ref: RDSDBParameterGroup
+      Engine: aurora
+      DBClusterIdentifier:
+        Ref: RDSCluster
+      DBInstanceIdentifier:
+        Ref: DBInstanceIdentifier2
+      AvailabilityZone:
+        Fn::GetAtt:
+        - SubnetUptimeProxyZoneB
+        - AvailabilityZone
+      DBInstanceClass: db.t2.small
+
+  #
+  # Defines the resource creates a new Amazon Relational Database Service (Amazon RDS) database (DB) cluster parameter group.
+  # Applying a parameter group to a DB cluster might require instances to reboot, resulting in a database outage while the instances reboot.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-rds-dbclusterparametergroup.html
+  #
+  RDSDBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: CloudFormation Aurora Cluster Parameter Group
+      Family: aurora5.6
+      Parameters:
+        time_zone: US/Eastern
+  #
+  # Defines the custom parameter group for an RDS database family.
+  # A default DB parameter group is created if you create a DB instance without specifying a customer-created DB parameter group
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-rds-dbparametergroup.html
+  #
+  RDSDBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: CloudFormation Sample Aurora Parameter Group
+      Family: aurora5.6
+      Parameters:
+        sql_mode: IGNORE_SPACE
+  #
+  # Defines the launch configuration of N3 Uptime EC2 instances.
+  #
+  # Because EC2 instances are launched and terminated based on usage, we don't
+  # define EC2 instances directly. Instead, the launch configuration acts as a
+  # template for how new EC2 instances should be created when the auto-scaling
+  # group increases its pool.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-as-launchconfig.html
+  #
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: true
+      ImageId:
+        Fn::FindInMap:
+        - RegionMap
+        - Ref: AWS::Region
+        - AMI
+      IamInstanceProfile:
+        Ref: InstanceProfile
+      InstanceType: t2.micro
+      SecurityGroups:
+      - Ref: SecurityGroupN3UptimeProxy
+      BlockDeviceMappings:
+        - DeviceName: '/dev/sda1'
+          Ebs:
+            VolumeSize: 40
+      KeyName: n3uptime
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            curl https://aws-codedeploy-us-east-1.s3.amazonaws.com/latest/install > /tmp/install.sh
+            chmod +x /tmp/install.sh
+            sudo /tmp/install.sh auto
+            rm /tmp/install.sh
+            sudo sed -i 's+/var/www/html+/var/www/html/docroot+g' /etc/nginx/sites-enabled/000-default.conf
+            sudo systemctl restart nginx
+            sudo service codedeploy-agent restart
+            sudo cat > /etc/profile.d/load_env.sh << 'EOF'
+            export REGION=${AWS::Region}
+            export DB_HOST=${RDSDBInstance2.Endpoint.Address}
+            export DB_NAME=${DataBaseName}
+            export DB_USER=${DataBaseUser}
+            export DB_PASSWORD=${DataBasePassword}
+
+            EOF
+
+  #
+  # Auto-scaling application resources
+  #
+  # These resources define how resources that scale based on usage are created
+  # and destroyed.
+  #
+  # The primary mechanism for this is an auto-scaling group that defines the
+  # upper and lower bounds of the pool of resources. Additional policies define
+  # the conditions under which the pool is enlarged or shrunk, and alarms
+  # provide the data evaluated by the auto-scaling policies.
+  #
+
+  #
+  # Defines the auto-scaling group for the EC2 instances making up the Uptime proxy.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-as-group.html
+  #
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+    - VPCGatewayAttachment
+    Properties:
+      AvailabilityZones:
+      - Ref: AvailabilityZone1
+      - Ref: AvailabilityZone2
+      DesiredCapacity:
+        Ref: DesiredCapacity
+      HealthCheckGracePeriod: '900'
+      HealthCheckType: ELB
+      LaunchConfigurationName:
+        Ref: LaunchConfiguration
+      LoadBalancerNames:
+      - Ref: ELBN3UptimeProxy
+      MaxSize: 5
+      MinSize:
+        Ref: DesiredCapacity
+      TerminationPolicies:
+      - OldestLaunchConfiguration
+      VPCZoneIdentifier:
+      - Ref: SubnetUptimeProxyZoneA
+      - Ref: SubnetUptimeProxyZoneB
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: '1'
+        MinInstancesInService:
+        - Ref: DesiredCapacity
+
+  #
+  # SQS FIFO queue
+  #
+  # These resources will create SQS First in First Out queue
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-as-group.html
+  #
+  N3UptimeTaskQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: True
+      QueueName:
+        'Fn::Sub': '${SqsNameIdentifier}'
+      MaximumMessageSize: 2048 # Maximum message size in bytes. Min is 1024 bytes & Max is 262144 bytes
+      MessageRetentionPeriod: 3600 # Maximum Retention Period will be in seconds. Min is 60 seconds Max is 1209600
+      VisibilityTimeout: 60 # Visibility Timeout will be in seconds. Min is 0 seconds Max is 43200
+  #
+  # A policy that contains the permissions for the specified Amazon SQS queues
+  # @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-sqs-policy.html
+  #
+  SQSN3UptimeQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - Ref: N3UptimeTaskQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: SQSN3UptimeQueuePolicy
+        Statement:
+          - Resource:
+              - Fn::GetAtt:
+                  - "N3UptimeTaskQueue"
+                  - "Arn"
+            Effect: "Allow"
+            Sid: "*"
+            Action:
+              - "sqs:*"
+            Principal:
+              AWS: "*"
+
+  #
+  # The AWS::Lambda::Function resource creates an AWS Lambda (Lambda) function that can run code in response to events
+  # Create Dynamic lamda function to add domain in sqs.
+  # Attached VPC configuration
+  # @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+  #
+  N3UptimeLambdaFunctionToAddDomain:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Creating lambda function for N3Uptime to add domain to sqs"
+      Code:
+        S3Bucket:
+          'Fn::Sub': '${ArtifactBucket}' #S3 bucket Name
+        S3Key: sqsQueueDomainEntry.zip #zip file
+      Environment:
+        Variables:
+          hostName: "" #Databse host name
+          userName: "" #Databse user name
+          password: "" #Databse password
+          databaseName: "" #Databse name
+          accessKeyId: "" #Aws accessKeyId
+          secretAccessKey: "" #Aws secretAccessKey
+          queueUrl: "" #Sqs queue url
+          region: "" #Region
+      FunctionName:
+        'Fn::Sub': '${LambdaFnToAddDomainInSqs}' #lambda function name
+      Handler: index.handler
+      Role:
+        Fn::GetAtt: [ Role , "Arn" ]
+      Runtime: "nodejs8.10"
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+        - Ref: N3UptimeDBSecurityGroup
+        SubnetIds:
+        - Ref: SubnetUptimeProxyZoneA
+        - Ref: SubnetUptimeProxyZoneB
+
+  #
+  # Cloudwatch alarm to trigger the lambda function in every 5 minutes
+  # Lambda function will grab queued domains and add them to SQS
+  #
+  N3UptimeDomainEntryCloudWatchAlarm:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Cloudwatch alarm to trigger the lambda function in every 5 minutes"
+      ScheduleExpression:  cron(0/5 * * * ? *)
+      State: "ENABLED"
+      Targets:
+        - Arn:
+            'Fn::Sub': 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFnToAddDomainInSqs}'
+          Id:
+            'Fn::Sub': '${LambdaFnToAddDomainInSqs}'
+  #
+  # Adding permission to invoke the lambda function to trigger in every 5 minutes
+  #
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        'Fn::Sub': 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFnToAddDomainInSqs}'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt: [ N3UptimeDomainEntryCloudWatchAlarm , "Arn" ]
+  #
+  # Cloudwatch alarm to trigger the lambda function in every 1 minutes
+  # Lambda function will add cloudwatch alarms to manage the SQS queue
+  #
+  N3UptimeAlarmEventToPullSqsEntry:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Cloudwatch alarm to trigger the lambda function in every 1 minutes"
+      ScheduleExpression:  cron(0/1 * * * ? *)
+      State: "ENABLED"
+      Targets:
+        - Arn:
+            'Fn::Sub': 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFnToPullSqsEntries}'
+          Id:
+            'Fn::Sub': '${LambdaFnToPullSqsEntries}'
+  #
+  # Adding permission to invoke the lambda function to trigger in every 1 minutes
+  #
+  LambdaInvokePermission:
+    DependsOn: N3UptimeLambdaFunctionToPullSQSEntries
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        'Fn::Sub': 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFnToPullSqsEntries}'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt: [ N3UptimeAlarmEventToPullSqsEntry , "Arn" ]
+
+  #
+  # The AWS::Lambda::Function resource creates an AWS Lambda function that can run scanner code
+  # Create Dynamic lamda function scanner code.
+  # Attached VPC configuration
+  # @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+  #
+  N3UptimeLambdaScannerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Creating lambda function for scanning a domain"
+      Code:
+        S3Bucket:
+          'Fn::Sub': '${ArtifactBucket}' #S3 bucket Name
+        S3Key: scanner.zip #zip file
+      Environment:
+        Variables:
+          script_mode: "" #Script mode whether it is prod, stage and dev
+          signalFXToken: "" #Signalfx token
+      FunctionName:
+        'Fn::Sub': '${N3UptimeLambdaFunctionForScanner}' #lambda function name
+      Handler: index.handler
+      Role:
+        Fn::GetAtt: [ Role , "Arn" ]
+      Runtime: "nodejs8.10"
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+        - Ref: N3UptimeDBSecurityGroup
+        SubnetIds:
+        - Ref: SubnetUptimeProxyZoneA
+        - Ref: SubnetUptimeProxyZoneB
+  #
+  # The AWS::Lambda::Function resource creates an AWS Lambda function that will pull the entries from sqs queue
+  # Create Dynamic lamda function to pull the entries from sqs queue.
+  # Attached VPC configuration
+  # @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+  #
+  N3UptimeLambdaFunctionToPullSQSEntries:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Creating lambda function for pulling a domain from sqs queue"
+      Code:
+        S3Bucket:
+          'Fn::Sub': '${ArtifactBucket}' #S3 bucket Name
+        S3Key: pullSqsEntries.zip #zip file
+      Environment:
+        Variables:
+          accessKeyId: "" #aws access key
+          secretAccessKey: "" #aws access secret
+          region: "" #aws region
+          queueURL: "" #Queueurl
+      FunctionName:
+        'Fn::Sub': '${LambdaFnToPullSqsEntries}' #lambda function name
+      Handler: index.handler
+      Role:
+        Fn::GetAtt: [ Role , "Arn" ]
+      Runtime: "nodejs8.10"
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+        - Ref: N3UptimeDBSecurityGroup
+        SubnetIds:
+        - Ref: SubnetUptimeProxyZoneA
+        - Ref: SubnetUptimeProxyZoneB
